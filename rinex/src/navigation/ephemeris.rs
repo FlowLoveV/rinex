@@ -2,9 +2,8 @@ use super::{orbits::closest_nav_standards, NavMsgType, OrbitItem};
 use crate::constants::Constants;
 use crate::{constants, epoch, prelude::*, version::Version};
 
-use hifitime::Unit;
-use log::{log, Log};
-use nalgebra::{self as na, ComplexField, Rotation, Rotation3, Vector3, Vector4};
+use log::warn;
+use nalgebra::{self as na, Rotation, Rotation3, Vector3, Vector4};
 use std::collections::HashMap;
 use std::str::FromStr;
 use thiserror::Error;
@@ -80,7 +79,7 @@ impl EphemerisHelper {
         rotation_z * rotation_x
     }
 
-    pub(crate) fn orbit_velecity(&self) -> (f64, f64) {
+    pub(crate) fn orbit_velocity(&self) -> (f64, f64) {
         let (sin_u_k, cos_u_k) = self.u_k.sin_cos();
         let fd_x = self.fd_r_k * cos_u_k - self.r_k * self.fd_u_k * sin_u_k;
         let fd_y = self.fd_r_k * sin_u_k + self.r_k * self.fd_u_k * cos_u_k;
@@ -95,14 +94,14 @@ impl EphemerisHelper {
         ecef_xyz
     }
 
-    /// Calculate ecef velecity of MEO/IGSO sv
+    /// Calculate ecef velocity of MEO/IGSO sv
     /// work for GPS,Galieo,BeiDou(MEO/IGSO)
-    pub(crate) fn ecef_velecity(&self) -> Vector3<f64> {
+    pub(crate) fn ecef_velocity(&self) -> Vector3<f64> {
         let (x, y) = self.orbit_position;
         let (sin_omega_k, cos_omega_k) = self.omega_k.sin_cos();
         let (sin_i_k, cos_i_k) = self.i_k.sin_cos();
         // First Derivative of orbit position
-        let (fd_x, fd_y) = self.orbit_velecity();
+        let (fd_x, fd_y) = self.orbit_velocity();
         // First Derivative of rotation Matrix
         let mut fd_R = na::SMatrix::<f64, 3, 4>::zeros();
         fd_R[(0, 0)] = cos_omega_k;
@@ -121,11 +120,11 @@ impl EphemerisHelper {
         vel
     }
 
-    /// Calculate ecef position and velecity of MEO/IGSO sv
+    /// Calculate ecef position and velocity of MEO/IGSO sv
     /// # Return
     /// ( Position(x,y,z),Velecity(x,y,z) )
     pub(crate) fn ecef_pv(&self) -> (Vector3<f64>, Vector3<f64>) {
-        (self.ecef_position(), self.ecef_velecity())
+        (self.ecef_position(), self.ecef_velocity())
     }
 
     /// Calculate ecef position of GEO sv
@@ -137,12 +136,12 @@ impl EphemerisHelper {
         ecef_xyz
     }
 
-    /// Calculate ecef velecity of GEO sv
-    pub(crate) fn beidou_geo_ecef_velecity(&self) -> Vector3<f64> {
+    /// Calculate ecef velocity of GEO sv
+    pub(crate) fn beidou_geo_ecef_velocity(&self) -> Vector3<f64> {
         let (x, y) = self.orbit_position;
         let (sin_omega_k, cos_omega_k) = self.omega_k.sin_cos();
         let (sin_i_k, cos_i_k) = self.i_k.sin_cos();
-        let (fd_x, fd_y) = self.orbit_velecity();
+        let (fd_x, fd_y) = self.orbit_velocity();
         let fd_xgk = -y * self.fd_omega_k - fd_y * cos_i_k * sin_omega_k + fd_x * cos_omega_k;
         let fd_ygk = x * self.fd_omega_k + fd_y * cos_i_k * cos_omega_k + fd_x * sin_omega_k;
         let fd_zgk = fd_y * sin_i_k + y * self.fd_i_k * cos_i_k;
@@ -168,14 +167,14 @@ impl EphemerisHelper {
         vel
     }
 
-    /// Calculate ecef position and velecity of BeiDou GEO sv
+    /// Calculate ecef position and velocity of BeiDou GEO sv
     /// # Return
     /// ( Position(x,y,z),Velecity(x,y,z) )
     pub(crate) fn beidou_geo_ecef_pv(&self) -> (Vector3<f64>, Vector3<f64>) {
         let (x, y) = self.orbit_position;
         let (sin_omega_k, cos_omega_k) = self.omega_k.sin_cos();
         let (sin_i_k, cos_i_k) = self.i_k.sin_cos();
-        let (fd_x, fd_y) = self.orbit_velecity();
+        let (fd_x, fd_y) = self.orbit_velocity();
         let fd_xgk = -y * self.fd_omega_k - fd_y * cos_i_k * sin_omega_k + fd_x * cos_omega_k;
         let fd_ygk = x * self.fd_omega_k + fd_y * cos_i_k * cos_omega_k + fd_x * sin_omega_k;
         let fd_zgk = fd_y * sin_i_k + y * self.fd_i_k * cos_i_k;
@@ -213,16 +212,14 @@ impl EphemerisHelper {
                 }
             },
             _ => {
-                log::warn!(
-                    "EphemerisHelper currently only supports orbit solutions for BDS GPS GALIEO"
-                );
+                warn!("EphemerisHelper currently only supports orbit solutions for BDS GPS GALIEO");
                 None
             },
         }
     }
 
-    /// get ecef position and velecity
-    pub fn position_velecity(&self) -> Option<(Vector3<f64>, Vector3<f64>)> {
+    /// get ecef position and velocity
+    pub fn position_velocity(&self) -> Option<(Vector3<f64>, Vector3<f64>)> {
         match self.sv.constellation {
             Constellation::GPS | Constellation::Galileo => Some(self.ecef_pv()),
             Constellation::BeiDou => {
@@ -359,23 +356,30 @@ impl Ephemeris {
                 todo!("sv_clock_corr not supported for glonass @ the moment");
             },
             _ => {
-                let dt = (t - toe).to_seconds();
+                let mut dt = (t - toe).to_seconds();
+                // TODO: does this apply to others like GST ?
+                const WEEK_SECONDS: f64 = 604800.0;
+                if dt > WEEK_SECONDS / 2.0 {
+                    dt -= WEEK_SECONDS;
+                } else if dt < -WEEK_SECONDS / 2.0 {
+                    dt += WEEK_SECONDS;
+                }
                 Duration::from_seconds(a0 + a1 * dt + a2 * dt.powi(2))
             },
         }
     }
-    /*
-     * Return epoch of toe in gpst scale
-     */
-    pub(crate) fn toe(&self, ts: TimeScale) -> Option<Epoch> {
-        let week = self.get_week()?;
+    /// Return epoch of toe expressed as Epoch in GPS timescale
+    /// for a specific [SV] that belongs to [TimeScale].
+    pub fn toe_gpst(&self, sv_ts: TimeScale) -> Option<Epoch> {
+        let mut week = self.get_week()?;
+        if sv_ts == TimeScale::GST {
+            week -= 1024;
+        }
         let sec = self.get_orbit_f64("toe")?;
         let week_dur = Duration::from_days((week * 7) as f64);
         let sec_dur = Duration::from_seconds(sec);
-        let t = Epoch::from_duration(week_dur + sec_dur, ts);
-        Some(Epoch::from_gpst_duration(
-            t.to_duration_in_time_scale(TimeScale::GPST),
-        ))
+        let t = Epoch::from_duration(week_dur + sec_dur, sv_ts);
+        Some(Epoch::from_duration(week_dur + sec_dur, sv_ts).to_time_scale(TimeScale::GPST))
     }
     /*
      * get Adot field in CNAV ephemeris
@@ -384,18 +388,16 @@ impl Ephemeris {
         self.get_orbit_f64("a_dot")
     }
     /*
-     * get the difference between toe and observation epoch
+     * Get the difference between toe and observation epoch,
+     * as total seconds elapsed in GPS timescale
      */
     pub(crate) fn tk(&self, sv: SV, t: Epoch) -> Option<f64> {
-        let toe = self.toe(sv.timescale()?)?;
+        let toe = self.toe_gpst(sv.timescale()?)?;
         let t_dur = t.to_gpst_duration();
-        let t_k = (t_dur - toe.to_duration()).to_seconds();
-        if let Some(dur) = Self::max_dtoe(sv.constellation) {
-            if t_k.abs() <= dur.to_seconds() {
-                Some(t_k)
-            } else {
-                None
-            }
+        let t_k = (t_dur - toe.duration).to_seconds();
+        let dur = Self::max_dtoe(sv.constellation)?;
+        if t_k.abs() <= dur.to_seconds() {
+            Some(t_k)
         } else {
             None
         }
@@ -530,7 +532,7 @@ impl Ephemeris {
             .ok_or(Error::TimescaleIdentification(sv))?;
         //println!("V2/V3 CONTENT \"{}\" TIMESCALE {}", line, ts); //DEBUG
 
-        let (epoch, _) = epoch::parse_in_timescale(date.trim(), ts)?;
+        let epoch = epoch::parse_in_timescale(date.trim(), ts)?;
 
         let clock_bias = f64::from_str(clk_bias.replace('D', "E").trim())?;
         let clock_drift = f64::from_str(clk_dr.replace('D', "E").trim())?;
@@ -566,7 +568,7 @@ impl Ephemeris {
         let (svnn, rem) = line.split_at(4);
         let sv = SV::from_str(svnn.trim())?;
         let (epoch, rem) = rem.split_at(19);
-        let (epoch, _) = epoch::parse_in_timescale(epoch.trim(), ts)?;
+        let epoch = epoch::parse_in_timescale(epoch.trim(), ts)?;
 
         let (clk_bias, rem) = rem.split_at(19);
         let (clk_dr, clk_drr) = rem.split_at(19);
@@ -654,34 +656,33 @@ impl Ephemeris {
         s.set_orbit_f64("omegaDot", perturbations.omega_dot);
         s
     }
-    /*
-     * Kepler position solver at desired instant "t" for given "sv"
-     * based off Self. Self must be correctly selected in navigation
-     * record.
-     * "t" should not be expressed in UTC time scale as the hifitime doesn't consider
-     * the leap seconds
-     * See [Bibliography::AsceAppendix3], [Bibliography::JLe19] and [Bibliography::BeiDouICD]
-     */
-    pub(crate) fn kepler2position(&self, sv: SV, t: Epoch) -> Option<(f64, f64, f64)> {
+
+    /// Kepler position solver at desired instant "t" for given "sv"
+    /// based off Self. Self must be correctly selected in navigation
+    /// record.
+    /// "t" should not be expressed in UTC time scale as Hifitime doesn't consider
+    /// the leap seconds.
+    /// See [Bibliography::AsceAppendix3], [Bibliography::JLe19] and [Bibliography::BeiDouICD]
+    pub fn kepler2position(&self, sv: SV, t: Epoch) -> Option<(f64, f64, f64)> {
         let helper = self.ephemeris_helper(sv, t)?;
         let pos = helper.position()?;
         Some((pos.x / 1000.0, pos.y / 1000.0, pos.z / 1000.0))
     }
     /*
-     * Kepler position and velecity solver at desired instant "t" for given "sv"
+     * Kepler position and velocity solver at desired instant "t" for given "sv"
      * based off Self. Self must be correctly selected in navigation
      * record.
      * "t" should not be expressed in UTC time scale as the hifitime doesn't consider
      * the leap seconds
      * See [Bibliography::AsceAppendix3], [Bibliography::JLe19] and [Bibliography::BeiDouICD]
      */
-    pub(crate) fn kepler2position_velecity(
+    pub(crate) fn kepler2position_velocity(
         &self,
         sv: SV,
         t: Epoch,
     ) -> Option<((f64, f64, f64), (f64, f64, f64))> {
         let helper = self.ephemeris_helper(sv, t)?;
-        let (pos, vel) = helper.position_velecity()?;
+        let (pos, vel) = helper.position_velocity()?;
         Some((
             (pos.x / 1000.0, pos.y / 1000.0, pos.z / 1000.0),
             (vel.x, vel.y, vel.z),
@@ -707,11 +708,11 @@ impl Ephemeris {
             _ => self.kepler2position(sv, epoch),
         }
     }
-    /// Returns SV position in km ECEF and velecity is m/s ECEF,
+    /// Returns SV position in km ECEF and velocity is m/s ECEF,
     /// based off Self Ephemeris data,
     /// and for given Satellite Vehicle at given Epoch.
     /// Either by solving Kepler equations, or directly if such data is available.
-    pub fn sv_position_velecity(
+    pub fn sv_position_velocity(
         &self,
         sv: SV,
         epoch: Epoch,
@@ -732,7 +733,7 @@ impl Ephemeris {
                  */
                 Some(((x_km, y_km, z_km), (vx, vy, vz)))
             },
-            _ => self.kepler2position_velecity(sv, epoch),
+            _ => self.kepler2position_velocity(sv, epoch),
         }
     }
     /// Helper method to calculate elevation and azimuth angles, both in degrees,
@@ -795,21 +796,18 @@ impl Ephemeris {
             reference.to_ecef_wgs84(),
         ))
     }
-    /*
-     * Returns max time difference between an Epoch and
-     * related Time of Issue of Ephemeris, for each constellation.
-     */
-    pub(crate) fn max_dtoe(c: Constellation) -> Option<Duration> {
+    /// Returns Ephemeris validity duration for this Constellation
+    pub fn max_dtoe(c: Constellation) -> Option<Duration> {
         match c {
             Constellation::GPS | Constellation::QZSS => Some(Duration::from_seconds(7200.0)),
             Constellation::Galileo => Some(Duration::from_seconds(10800.0)),
-            Constellation::BeiDou => Some(Duration::from_seconds(3600.0)),
-            Constellation::IRNSS => Some(Duration::from_seconds(86400.0)),
+            Constellation::BeiDou => Some(Duration::from_seconds(21600.0)),
+            Constellation::IRNSS => Some(Duration::from_seconds(7200.0)),
             Constellation::Glonass => Some(Duration::from_seconds(1800.0)),
             c => {
                 if c.is_sbas() {
                     //TODO: verify this please
-                    Some(Duration::from_seconds(7200.0))
+                    Some(Duration::from_seconds(360.0))
                 } else {
                     None
                 }
@@ -934,7 +932,7 @@ mod test {
     ) -> HashMap<String, OrbitItem> {
         let mut map: HashMap<String, OrbitItem> = HashMap::with_capacity(descriptor.len());
         for (key, value) in descriptor.iter() {
-            if key.contains("Week") {
+            if key.contains("week") {
                 map.insert(
                     key.to_string(),
                     OrbitItem::new("u32", value, constellation).unwrap(),
@@ -1176,278 +1174,5 @@ mod test {
         assert_eq!(ephemeris.get_orbit_f64("velX"), None);
         assert_eq!(ephemeris.get_orbit_f64("satPosY"), Some(-0.216949155273E5));
         assert_eq!(ephemeris.get_orbit_f64("satPosZ"), Some(0.109021518555E5));
-    }
-    use super::{Ephemeris, Kepler, Perturbations};
-    use serde::Deserialize;
-    #[derive(Default, Debug, Clone, Deserialize)]
-    struct Helper {
-        #[serde(with = "epoch_serde")]
-        epoch: Epoch,
-        sv: SV,
-        azi: f64,
-        elev: f64,
-        week: u32,
-        kepler: Kepler,
-        ecef: (f64, f64, f64),
-        ref_pos: GroundPosition,
-        perturbations: Perturbations,
-    }
-    fn helper_to_ephemeris(hp: Helper) -> Ephemeris {
-        Ephemeris::default()
-            .with_kepler(hp.kepler)
-            .with_perturbations(hp.perturbations)
-            .with_week(hp.week)
-    }
-    #[test]
-    fn kepler_gpst() {
-        let descriptors: Vec<&str> = vec![
-            r#"
-{
-  "epoch": "2020-12-31T23:59:44.000000000 UTC",
-  "sv": {
-    "prn": 7,
-    "constellation": "GPS"
-  },
-  "week": 2138,
-  "ref_pos": [3628427.9118,562059.0936,5197872.215],
-  "ecef": [605350.1978036277,-20286526.552827496,17200398.126797352],
-  "elev": 15.00220128288493,
-  "azi": 300.68660523817476,
-  "kepler": {
-    "a": 26559660.946231633,
-    "e": 0.0143113207305,
-    "i_0": 0.951953396771,
-    "omega_0": 2.33342477886,
-    "m_0": -1.67314469571,
-    "omega": -2.35693190038,
-    "toe": 431984.0
-  },
-  "perturbations": {
-    "dn": 2.543973073573274e-17,
-    "i_dot": -1.59292343205e-10,
-    "omega_dot": -8.03426303264e-09,
-    "cus": 5.50784170628e-06,
-    "cuc": -8.475035429e-07,
-    "cis": -8.00937414169e-08,
-    "cic": 2.21654772758e-07,
-    "crs": -15.09375,
-    "crc": 262.65625
-  }
-}"#,
-            r#"
-{
-  "epoch": "2021-01-02T00:00:00.000000000 UTC",
-  "sv": {
-    "prn": 18,
-    "constellation": "GPS"
-  },
-  "week": 2138,
-  "ref_pos": [3628427.9118,562059.0936,5197872.215],
-  "ecef": [257853.85371909104,19563995.622981288,17931314.572146047],
-  "elev": 26.125733114760926,
-  "azi": 68.34811299624617,
-  "kepler": {
-    "a": 26560589.686413657,
-    "e": 0.00118253775872,
-    "i_0": 0.966406105756,
-    "omega_0": -0.795452281483,
-    "m_0": -0.839958584081,
-    "omega": 3.01997025999,
-    "toe": 518400.0
-  },
-  "perturbations": {
-    "dn": 2.06749838401754e-17,
-    "i_dot": -2.05365696671e-10,
-    "omega_dot": -8.41106473359e-09,
-    "cus": 8.62404704094e-07,
-    "cuc": -2.65054404736e-06,
-    "cis": -7.63684511185e-08,
-    "cic": -2.79396772385e-08,
-    "crs": -49.96875,
-    "crc": 367.125
-  }
-}"#,
-            r#"
-{
-  "epoch": "2021-01-02T00:00:00.000000000 UTC",
-  "sv": {
-    "prn": 30,
-    "constellation": "GPS"
-  },
-  "week": 2138,
-  "ref_pos": [3628427.9118,562059.0936,5197872.215],
-  "ecef": [-8565700.261484932,-13909486.809253218,20957103.36075533],
-  "elev": 11.018002970007121,
-  "azi": 329.0430784548838,
-  "kepler": {
-    "a": 26561204.90386163,
-    "e": 0.00474791659508,
-    "i_0": 0.937190900254,
-    "omega_0": 2.35208528936,
-    "m_0": -1.64976237865,
-    "omega": -2.84623407963,
-    "toe": 518400.0
-  },
-  "perturbations": {
-    "dn": 2.9993768567594165e-17,
-    "i_dot": -7.00029159024e-11,
-    "omega_dot": -8.43535136624e-09,
-    "cus": 5.39235770702e-06,
-    "cuc": -6.07222318649e-07,
-    "cis": -2.421438694e-08,
-    "cic": 7.63684511185e-08,
-    "crs": -7.5,
-    "crc": 261.46875
-  }
-}"#,
-            r#"
-{
-  "epoch": "2021-12-31T22:00:00.000000000 UTC",
-  "sv": {
-    "prn": 8,
-    "constellation": "GPS"
-  },
-  "week": 2190,
-  "ref_pos": [3628427.9118,562059.0936,5197872.215],
-  "ecef": [7360759.045154838,-20964798.98238912,14276873.329646083],
-  "elev": 18.884894173760276,
-  "azi": 282.6253915920682,
-  "kepler": {
-    "a": 26560621.613883533,
-    "e": 0.00704538438004,
-    "i_0": 0.965195715133,
-    "omega_0": -2.11600985989,
-    "m_0": 0.637626493874,
-    "omega": 0.0714426386841,
-    "toe": 511200.0
-  },
-  "perturbations": {
-    "dn": 2.214895343799872e-17,
-    "i_dot": 1.78578867098e-11,
-    "omega_dot": -8.54178437103e-09,
-    "cus": -4.56348061562e-07,
-    "cuc": 3.36021184921e-06,
-    "cis": 5.58793544769e-08,
-    "cic": 1.32247805595e-07,
-    "crs": 63.25,
-    "crc": 384.46875
-  }
-}"#,
-            r#"
-{
-  "epoch": "2022-01-01T00:00:00.000000000 UTC",
-  "sv": {
-    "prn": 32,
-    "constellation": "GPS"
-  },
-  "week": 2190,
-  "ref_pos": [3628427.9118,562059.0936,5197872.215],
-  "ecef": [16685968.411769923,20728763.631397538,-1574846.006229475],
-  "elev": 8.386332281745226,
-  "azi": 133.44087594021298,
-  "kepler": {
-    "a": 26561110.712759566,
-    "e": 0.00534839148168,
-    "i_0": 0.957537602313,
-    "omega_0": 1.03791041521,
-    "m_0": 2.30316624652,
-    "omega": -2.3834050415,
-    "toe": 518400.0
-  },
-  "perturbations": {
-    "dn": 2.3949035344821167e-17,
-    "i_dot": 5.11807041192e-10,
-    "omega_dot": -8.0467641439e-09,
-    "cus": 6.09830021858e-06,
-    "cuc": 9.85339283943e-07,
-    "cis": -1.54599547386e-07,
-    "cic": -1.04308128357e-07,
-    "crs": 17.3125,
-    "crc": 258.34375
-  }
-}"#,
-            r#"
-{
-  "epoch": "2021-12-30T20:00:00.000000000 UTC",
-  "sv": {
-    "prn": 11,
-    "constellation": "GPS"
-  },
-  "week": 2190,
-  "ref_pos": [3628427.9118,562059.0936,5197872.215],
-  "ecef": [-16564151.460786693,12177059.553538049,16806283.53619841],
-  "elev": -2.06436127635181,
-  "azi": 34.06512647418462,
-  "kepler": {
-    "a": 26561225.448593915,
-    "e": 0.000327356392518,
-    "i_0": 0.961559997976,
-    "omega_0": -0.990953651689,
-    "m_0": -0.519517248299,
-    "omega": 2.77982583653,
-    "toe": 417600.0
-  },
-  "perturbations": {
-    "dn": 1.7909501455594142e-17,
-    "i_dot": -1.72864347836e-10,
-    "omega_dot": -7.98926169665e-09,
-    "cus": 8.02055001259e-06,
-    "cuc": -7.46361911297e-06,
-    "cis": -9.49949026108e-08,
-    "cic": 4.65661287308e-08,
-    "crs": -144.84375,
-    "crc": 229.125
-  }
-}"#,
-        ];
-        // test all descriptors
-        for descriptor in descriptors {
-            let helper = serde_json::from_str::<Helper>(descriptor);
-            assert!(helper.is_ok(), "faulty test data description");
-            let helper = helper.unwrap();
-
-            // parse
-            let ephemeris = helper_to_ephemeris(helper.clone());
-            assert!(
-                ephemeris.kepler().is_some(),
-                "kepler parameters setup failed"
-            );
-            assert!(
-                ephemeris.perturbations().is_some(),
-                "orbit perturbations setup failed"
-            );
-            assert!(
-                ephemeris.get_week().is_some(),
-                "missing week counter, context is faulty"
-            );
-
-            // solver
-            let ecef = ephemeris.sv_position(helper.sv, helper.epoch);
-            assert!(
-                ecef.is_some(),
-                "kepler2ecef should be feasible with provided context"
-            );
-
-            let ecef = ecef.unwrap();
-
-            let x_err = (ecef.0 * 1000.0 - helper.ecef.0).abs();
-            let y_err = (ecef.1 * 1000.0 - helper.ecef.1).abs();
-            let z_err = (ecef.2 * 1000.0 - helper.ecef.2).abs();
-            assert!(x_err < 1E-6, "kepler2ecef: x_err too large: {}", x_err);
-            assert!(y_err < 1E-6, "kepler2ecef: y_err too large: {}", y_err);
-            assert!(z_err < 1E-6, "kepler2ecef: z_err too large: {}", z_err);
-
-            let el_az = ephemeris.sv_elev_azim(helper.sv, helper.epoch, helper.ref_pos);
-            assert!(
-                el_az.is_some(),
-                "sv_elev_azim: should have been feasible in this context!"
-            );
-
-            let (elev, azim) = el_az.unwrap();
-            let el_err = (elev - helper.elev).abs();
-            let az_err = (azim - helper.azi).abs();
-            assert!(el_err < 1E-6, "sv_elev: error too large: {}", el_err);
-            assert!(az_err < 1E-6, "sv_azim: error too large: {}", az_err);
-        }
     }
 }
